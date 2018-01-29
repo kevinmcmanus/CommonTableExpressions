@@ -1,0 +1,350 @@
+---
+title: "Common Table Expressions in SQL"
+author: "Kevin McManus"
+output:
+  html_document: default
+  html_notebook: default
+---
+
+Common Table Expressions (CTE) are an SQL construct that allow you to encapsulate and possibly reuse components of a complex query.
+They have many uses, in this example, their main purpose is to simplify what would otherwise be an unwieldy query.
+
+We'll use a specific problem to illustrate the approach.  From a music database that records which cusomters bought which music tracks, we want a query that shows for each country the name, the artist and the number of times purchased for the track that was purchased most frequently in the country.
+
+We'll build the query from the ground up.
+Each section below illustrates a different sub-query that is necessary to meet the objective.
+The sub-queries are then encapsulated into Common Table Expressions to be reused in later sections of the document.
+
+## Some Preliminaries 
+### SQLite 
+In this tutorial, we'll use the SQLite database application and a sample database that comes with it.
+Download the SQLite database browser from http://sqlitebrowser.org/ and install it on your system.
+Obtain the sample database from http://www.sqlitetutorial.net/sqlite-sample-database/ and save it locally.
+While you're on this site, examine the database diagram of the sample database.
+
+### Connecting this Notebook to the Database
+For the purpose of this tutorial, we need to establish a connection from the database to the R environment that produces this notebook.
+Doing so will enable us to issue SQL statements and capture their output in this notebook.
+The code below creates a db connection variable `con` which identifies which database we're working with.
+
+
+```{r, warning=FALSE, message = FALSE}
+require(RSQLite)
+driver <-  dbDriver("SQLite")
+
+# path to the database file
+dbpath <- "./chinook.db"
+
+# connect to the db
+con = dbConnect(driver,dbpath)
+
+# test query to make sure the connection is good
+dbGetQuery(con,"select CustomerID, FirstName, LastName from customers limit 5")
+```
+## Constructing the Query 
+Our objective is to identify the most popular track and its artist within each country.
+Looking at the database diagram, the customer table has a country column.
+customers pay invoices, invoices have invoice_items and invoice_items identify the individual tracks.
+From the track we can identify the album and therefore the album's artist.
+So the query we'll write will combine records from the customer, invoice, invoice_items,  album and artist tables through a series of relational joins.  Five tables will participate in this query.
+
+We could write our query as one big select statment with a whole series of joins.
+Doing so would result in a query whose SQL code would be difficult to read and maintain.
+Alternately, we could create a series of views for each component of the query and join all the views together.
+But this approach results in a lot of views littering the database.
+
+Common Table Expressions (CTE) provide a nice middle ground between these two approaches.
+
+###Common Table Expressions 
+Common Table Expressions can function somewhat like a view in the context of a query. (CTE have other uses, too, but these are outside the scope of this discussion.) 
+Here's an trivial example of using a CTE to identify the customers in Brazil:
+```{sql connection=con}
+-- cte's are introduced with the 'WITH' clause:
+with Brazilians as (
+    select c.country, c.firstname, c.lastname
+        from customers c
+        where c.Country = 'Brazil'
+    )
+    
+--just reference the cte like any other table or view
+select * from Brazilians
+
+```
+
+The general syntax for a CTE is:
+```{sql connection=con, eval = FALSE}
+CTE ::= WITH cte [,cte ...]
+
+cte ::= <ctename> AS ( <selectstatement> )
+```
+
+Now that we've seen an example and know the syntax, let's build our query from the bottom up.
+
+###Tracks and Artists 
+Tracks are identified by a trackid; the tracks table has a foriegn key to the album table (the column named albumid).
+The albums table likewise has a foriegn key that points to the artist table through the column named artistid.
+Since our objective requires us to show track name and artist, we'll make a sub-query to map trackid to trackname and artist. The cell below does this.
+
+Notice in the example below, two CTE strung together separated by a comma.
+```{sql connection=con}
+--need a (sub)-query to produce trackid, trackname, artist
+with
+ --get the artist from the album
+ artistname as (
+    select al.albumid, ar.name as artistname
+    from albums al left join artists ar on al.artistid = ar.artistid
+    )
+    
+ -- associate the artist with the track    
+,trackartist as (
+    select tr.trackid, tr.name as trackname, an.artistname
+    from tracks tr left join artistname an on tr.albumid = an.albumid
+    )
+    
+select * from trackartist limit 10
+
+```
+
+###Invoices and Tracks  
+Customers live in countries; customers pay invoices and invoices indicate which tracks a customer purchased.
+Working from the bottom up, we'll first show for any given invoice which tracks are on that invoice.
+```{sql connection=con}
+with
+  -- which tracks are on which invoices
+ invoicetracks as (
+    select iv.customerid, iv.invoiceid, ii.trackid
+    from invoices iv left join invoice_items ii on iv.invoiceid = ii.invoiceid
+ )
+ 
+-- demonstrate which tracks are on which invoice
+select * from invoicetracks limit 10
+```
+The output above shows invoice #98 has two tracks on it, #121 has four, etc and that these were invoiced to customer #1
+
+### Customers and Tracks 
+Here we will reuse the CTE from the previous example and add some more customer info to it.
+We accomplish this by joining the invoices to customers through the `customerid` column that appears in both tables.
+```{sql connection=con, print.limit=100}
+with
+  -- which tracks are on which invoices
+ invoicetracks as (
+    select iv.customerid, iv.invoiceid, ii.trackid
+    from invoices iv left join invoice_items ii on iv.invoiceid = ii.invoiceid
+ )
+ 
+ -- show which tracks each customer purchased and info about that customer:
+ select cu.country, cu.firstname, cu.lastname, it.trackid
+ from customers cu left join invoicetracks it on cu.customerid = it.customerid
+ where cu.country in ('Austria', 'Belgium')
+```
+The output above shows all of the tracks that were purchased/invoice to customers in Austria and Belgium.
+If we then count the country/trackid occurances, we'll be able to see the most popular (commonly purchased) track within each country.
+
+### Track Counts within Country 
+Now we have the building blocks to achieve our query's objective.
+First we'll look at the number of times *each* track was purchased within each country, then we'll pull out the most popular track for each country.
+We'll reuse the `invoicetracks` CTE from the previous query.
+```{sql connection=con, max.print = 100}
+with
+  -- which tracks are on which invoices
+ invoicetracks as (
+    select iv.customerid, iv.invoiceid, ii.trackid
+    from invoices iv left join invoice_items ii on iv.invoiceid = ii.invoiceid
+    )
+    
+ -- the country of  the cusotmer that purchased each track:
+,countrytracks as (
+    select cu.country, it.trackid
+    from customers cu left join invoicetracks it on cu.customerid = it.customerid
+    )
+
+--count the number of times each track was purchased within each country
+--shown only for Canada and USA for brevity
+select ct.country, ct.trackid, count(ct.trackid) as countrytrackcount
+    from countrytracks ct
+    where country in ('USA', 'Canada')
+    group by ct.country, ct.trackid
+    order by  countrytrackcount desc
+    limit 20
+```
+Canada has two tracks that were  purchased twice whereas the USA has eight tracks that were purchased twice.  Both countries have a bunch of tracks that were purchased only once.
+For Canada, the most popular track is either #1554 or #1563. For the USA, the most popular track is one of the eight shown above.
+
+Our query objective requires us to produce *the* most popular track within a country.
+To get the one track that represents the most popular track, we need a way to break the tie between #1554 and #1563 for Canada and the eight tracks for the USA.
+Aribtrarily, we'll use the trackid as the tiebreaker. So for Canada, the most popular track is #1563 since its trackid is greater than the other track with two purchases (i.e. #1554).
+For the USA, the most popular track is #3455 since it has the greatest trackid among the tracks that have been twice purchased in the USA.
+
+
+### Get the Max trackid for each country/trackcount pair
+We're going to use the `trackid` to break ties in the purchase counts.
+Conceptually, we'll compute the number of times each track was purchased within each country, then within each count group (i.e. all the tracks purchased once, twice,..), compute the largest '`trackid`.
+Notice in the example below the different `group by` clauses.
+```{sql connection=con}
+with
+  -- which tracks are on which invoices
+ invoicetracks as (
+    select iv.customerid, iv.invoiceid, ii.trackid
+    from invoices iv left join invoice_items ii on iv.invoiceid = ii.invoiceid
+    )
+    
+ -- the country of  the cusotmer that purchased each track:
+,countrytracks as (
+    select cu.country, it.trackid
+    from customers cu left join invoicetracks it on cu.customerid = it.customerid
+    )
+    
+--count the number of times each track was purchased within each country
+,countrycounttracks as (
+    select ct.country, ct.trackid, count(ct.trackid) as countrytrackcount
+    from countrytracks ct
+    group by ct.country, ct.trackid
+    )
+
+--get the maximum track id within each country & track count group
+,countrycountid as (
+    select cmt.country, cmt.countrytrackcount, max(cmt.trackid)
+    from countrycounttracks cmt
+    group by cmt.country, cmt.countrytrackcount
+    )
+    
+-- demonstrate the result:    
+select * from countrycountid    
+```
+Given that we're working with a small sample database, the results of this query aren't particularly interesting since the maximum times a track has been purchased is only one.
+Regardless, we press on with our quest!
+
+### Highest Track Count within Country
+Notice in the output above, Canada shows two records: one for tracks purchased twice and one for tracks purchased only once.
+This table needs to be pared down so that it shows only the maximum `countrytrackcount` for each country.
+
+This is actually more difficult than it may sound because it involves a two-step process.
+First, we compute the `countrymaxcount` which is the maximum number of times any track was purchased with a country.
+Second, we use the country, maxcount pair to find the trackid (after tie breaking) for that pair.
+
+In the query below, the first step is accomplished by the `countrymaxcount` CTE.
+The second step is accomplished by the `countrymaxid` CTE.
+Notice the `inner join` in the `countrymaxid` CTE.
+This is how we find the `trackid` for the country, maxcount pair.
+```{sql connection=con}
+with
+  -- which tracks are on which invoices
+ invoicetracks as (
+    select iv.customerid, iv.invoiceid, ii.trackid
+    from invoices iv left join invoice_items ii on iv.invoiceid = ii.invoiceid
+    )
+    
+ -- the country of  the cusotmer that purchased each track:
+,countrytracks as (
+    select cu.country, it.trackid
+    from customers cu left join invoicetracks it on cu.customerid = it.customerid
+    )
+    
+--count the number of times each track was purchased within each country
+,countrycounttracks as (
+    select ct.country, ct.trackid, count(ct.trackid) as countrytrackcount
+    from countrytracks ct
+    group by ct.country, ct.trackid
+    )
+    
+--for each country, compute the maximum number of times any track was purchased
+,countrymaxcount as (
+    select ct.country, max(ct.countrytrackcount) as maxcount
+    from countrycounttracks ct
+    group by ct.country
+    )
+    
+--find the maximum trackid within each country, maxcount pair
+,countrycountid as (    
+    select cmt.country, cmt.countrytrackcount, max(cmt.trackid) trackid
+    from countrycounttracks cmt
+    group by cmt.country, cmt.countrytrackcount
+    )
+    
+--get the trackid associated with the country, maxcount pair
+,countrymaxid as (
+    select cmc.country, cci.trackid, cmc.maxcount
+    from countrymaxcount cmc inner join countrycountid cci on
+        cmc.country = cci.country and cmc.maxcount = cci.countrytrackcount
+    )
+
+--demonstrate
+select * from countrymaxid
+
+```
+
+
+###Put it All Together
+All that's left to do now is  get the track name and artist associated with the `trackid`.
+To do so, we'll include the `trackartist` and `artistname` CTE that we developed way back in the beginning.
+```{sql connection=con, max.print = 100}
+with
+  -- which tracks are on which invoices
+ invoicetracks as (
+    select iv.customerid, iv.invoiceid, ii.trackid
+    from invoices iv left join invoice_items ii on iv.invoiceid = ii.invoiceid
+    )
+    
+ -- the country of  the cusotmer that purchased each track:
+,countrytracks as (
+    select cu.country, it.trackid
+    from customers cu left join invoicetracks it on cu.customerid = it.customerid
+    )
+    
+--count the number of times each track was purchased within each country
+,countrycounttracks as (
+    select ct.country, ct.trackid, count(ct.trackid) as countrytrackcount
+    from countrytracks ct
+    group by ct.country, ct.trackid
+    )
+    
+--find the maximum trackid within each country, maxcount pair
+,countrycountid as (    
+    select cmt.country, cmt.countrytrackcount, max(cmt.trackid) trackid
+    from countrycounttracks cmt
+    group by cmt.country, cmt.countrytrackcount
+    )
+    
+--for each country, compute the maximum number of times any track was purchased    
+,countrymaxcount as (
+    select ct.country, max(ct.countrytrackcount) as maxcount
+    from countrycounttracks ct
+    group by ct.country
+    )
+    
+--get the trackid associated with the country, maxcount pair
+,countrymaxid as (
+    select cmc.country, cci.trackid, cmc.maxcount
+    from countrymaxcount cmc inner join countrycountid cci on
+        cmc.country = cci.country and cmc.maxcount = cci.countrytrackcount
+    )
+    
+ --get the artist from the album
+,artistname as (
+    select al.albumid, ar.name as artistname
+    from albums al left join artists ar on al.artistid = ar.artistid
+    )
+    
+ -- associate the artist with the track    
+,trackartist as (
+    select tr.trackid, tr.name as trackname, an.artistname
+    from tracks tr left join artistname an on tr.albumid = an.albumid
+    )
+
+--tada!!    
+select cmi.country, cmi.maxcount, cmi.trackid,
+        ta.trackname, ta.artistname
+from countrymaxid cmi left join trackartist ta on cmi.trackid = ta.trackid
+```
+
+### Tidy up 
+Like drinking 64 oz of water every day or flossing your teeth after each meal, it is a good practice to close your database connections!
+```{r}
+# Close the connection
+dbDisconnect(con)
+```
+##Conclusions
+Common table expressions allow you to encapsulate the sub-queries of a complex query among their other uses.
+By doing so, you can break a query into its logical components and provide a meaningful name for each component.
+Building the query from the ground up by accumulating CTE as was done here allows you to verify that each step is providing the results you expect.
+The net result is a complex query that easy (easier) to read and maintain.
