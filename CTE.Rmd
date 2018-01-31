@@ -4,6 +4,8 @@ author: "Kevin McManus"
 output:
   html_document: default
   html_notebook: default
+  md_document: 
+    variant: markdown_github
 ---
 
 Common Table Expressions (CTE) are an SQL construct that allow you to encapsulate and possibly reuse components of a complex query.
@@ -28,7 +30,7 @@ Doing so will enable us to issue SQL statements and capture their output in this
 The code below creates a db connection variable `con` which identifies which database we're working with.
 
 
-```{r, warning=FALSE, message = FALSE}
+```{r, warning=FALSE, message = FALSE, include=TRUE}
 require(RSQLite)
 driver <-  dbDriver("SQLite")
 
